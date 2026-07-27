@@ -36,6 +36,14 @@ WARN_SIZE = 20 * 1024 * 1024
 HIGH_SIZE = 50 * 1024 * 1024
 BLOCK_SIZE = 100 * 1024 * 1024
 
+PUBLIC_KEY_PREFIXES = (
+    "ssh-ed25519 ",
+    "ssh-rsa ",
+    "ecdsa-sha2-",
+    "sk-ecdsa-sha2-",
+    "sk-ssh-ed25519@openssh.com ",
+)
+
 GITIGNORE_BLOCK = r"""
 # >>> synnovator-submit managed rules >>>
 # Environment and secrets
@@ -293,9 +301,20 @@ def append_ssh_config(host: str, key_path: Path) -> None:
 
 
 def copy_to_clipboard(text: str) -> bool:
+    """尝试复制文本；失败不阻止终端继续展示完整公钥。"""
     commands: list[list[str]] = []
     if os.name == "nt":
         commands = [["clip"]]
+        if shutil.which("powershell.exe"):
+            commands.append(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$input | Set-Clipboard",
+                ]
+            )
     elif platform.system().lower() == "darwin":
         commands = [["pbcopy"]]
     else:
@@ -304,11 +323,99 @@ def copy_to_clipboard(text: str) -> bool:
         if not shutil.which(command[0]):
             continue
         try:
-            subprocess.run(command, input=text, text=True, check=True)
+            subprocess.run(
+                command,
+                input=text,
+                text=True,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             return True
         except (OSError, subprocess.CalledProcessError):
             continue
     return False
+
+
+def read_public_key(public_key_path: Path) -> str:
+    """读取并验证 OpenSSH 公钥，拒绝读取私钥或异常多行内容。"""
+    public_key_path = public_key_path.expanduser().resolve()
+    if public_key_path.suffix.lower() != ".pub":
+        raise ToolError(f"拒绝读取非 .pub 文件：{public_key_path}。该文件可能是私钥。")
+    if not public_key_path.is_file():
+        raise ToolError(f"未找到 SSH 公钥文件：{public_key_path}")
+
+    try:
+        raw = public_key_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
+        raise ToolError(f"无法读取 SSH 公钥文件：{public_key_path}：{exc}") from exc
+
+    if "PRIVATE KEY" in raw:
+        raise ToolError("检测到私钥内容，已停止展示。不得上传或输出私钥。")
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise ToolError("SSH 公钥格式异常：公钥必须是完整的一行。")
+
+    public_key = lines[0]
+    if not public_key.startswith(PUBLIC_KEY_PREFIXES):
+        raise ToolError(
+            "读取到的内容不是受支持的 SSH 公钥；应以 ssh-ed25519、ssh-rsa、"
+            "ecdsa-sha2- 等密钥类型开头。"
+        )
+
+    fields = public_key.split()
+    if len(fields) < 2 or not fields[1]:
+        raise ToolError("SSH 公钥格式异常：缺少密钥主体。")
+    return public_key
+
+
+def get_public_key_fingerprint(public_key_path: Path) -> str | None:
+    """返回 SHA256 指纹。指纹只用于核验，不能代替完整公钥。"""
+    if not shutil.which("ssh-keygen"):
+        return None
+    cp = run(
+        ["ssh-keygen", "-lf", str(public_key_path), "-E", "sha256"],
+        check=False,
+    )
+    output = "\n".join(x for x in ((cp.stdout or "").strip(), (cp.stderr or "").strip()) if x)
+    match = re.search(r"SHA256:[^\s]+", output)
+    return match.group(0) if match else None
+
+
+def show_public_key(public_key_path: Path) -> str:
+    """在终端完整展示可复制公钥，并把指纹降级为辅助信息。"""
+    public_key_path = public_key_path.expanduser().resolve()
+    public_key = read_public_key(public_key_path)
+    copied = copy_to_clipboard(public_key)
+    fingerprint = get_public_key_fingerprint(public_key_path)
+
+    print()
+    print("=" * 72)
+    print("SSH 公钥（请复制完整一行）")
+    print("=" * 72)
+    if copied:
+        print("完整公钥已复制到系统剪贴板；仍请核对下面显示的内容。")
+    else:
+        print("未能访问系统剪贴板，请手动复制下面显示的完整一行。")
+    print()
+    print("只复制两条边界线之间的公钥内容，不要复制边界线：")
+    print("----- SSH PUBLIC KEY BEGIN -----")
+    print(public_key)
+    print("----- SSH PUBLIC KEY END -------")
+    print()
+    print(f"公钥文件：{public_key_path}")
+    if fingerprint:
+        print()
+        print("仅供核验的公钥指纹（不要粘贴到‘密钥内容’输入框）：")
+        print(fingerprint)
+    print()
+    print("网页中粘贴的内容必须以 ssh-ed25519、ssh-rsa 或其他有效密钥类型开头。")
+    print("不要粘贴以 SHA256: 开头的指纹。")
+    print("不要读取、复制或上传不带 .pub 后缀的私钥文件。")
+    print("=" * 72)
+    print()
+    return public_key
 
 
 def classify_ssh_failure(output: str) -> str:
@@ -421,12 +528,13 @@ def bind_ssh(host: str, email: str) -> None:
         print(f"发现现有专用密钥：{key_path}")
 
     append_ssh_config(host, key_path)
-    public_key = pub_path.read_text(encoding="utf-8").strip()
-    copied = copy_to_clipboard(public_key)
-    print("\nSSH 公钥：")
-    print(public_key)
-    print("公钥已复制到剪贴板。" if copied else "未找到剪贴板工具，请手工复制上面整行公钥。")
-    print(f"请打开 {SETTINGS_URL}，填写密钥名称并粘贴公钥，然后点击“增加密钥”。")
+    show_public_key(pub_path)
+    print("绑定步骤：")
+    print(f"  1. 打开：{SETTINGS_URL}")
+    print("  2. ‘密钥名称’填写可识别名称，例如：比赛电脑-2026")
+    print("  3. ‘密钥内容’粘贴上方以 ssh-ed25519 等类型开头的完整一行公钥")
+    print("  4. 点击‘增加密钥’")
+    print("  5. 确认网页中不是以 SHA256: 开头，也没有复制 BEGIN/END 边界线")
     try:
         webbrowser.open(SETTINGS_URL)
     except Exception:
