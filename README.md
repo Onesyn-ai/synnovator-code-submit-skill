@@ -10,6 +10,12 @@
 
 ## 快速使用
 
+方式一：
+```bash
+请AI访问https://github.com/Onesyn-ai/synnovator-code-submit-skill.git并安装synnovator-code-submit-skill并使用
+```
+
+方式二：
 在项目根目录执行：
 
 ```bash
