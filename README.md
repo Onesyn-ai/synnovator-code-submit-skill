@@ -6,15 +6,10 @@
 
 - `SKILL.md`：完整工作流、对话规则和安全要求。
 - `scripts/synnovator_submit.py`：本地交互式一键提交脚本。
+- 中国大陆环境下，Git 安装引导优先提供清华大学 TUNA 镜像，并要求按系统版本匹配和备份原软件源。
 
 ## 快速使用
 
-方式一：
-```bash
-请AI访问https://github.com/Onesyn-ai/synnovator-code-submit-skill.git并安装synnovator-code-submit-skill并使用
-```
-
-方式二：
 在项目根目录执行：
 
 ```bash

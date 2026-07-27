@@ -166,17 +166,22 @@ def confirm_exact(prompt: str, expected: str) -> bool:
 def print_git_install_help() -> None:
     system = platform.system().lower()
     print("未检测到 Git。请先安装 Git，然后重新运行脚本。")
+    print("中国区清华镜像入口：https://mirrors.tuna.tsinghua.edu.cn/")
     if system == "windows":
-        print("Windows：winget install --id Git.Git -e --source winget")
-        print("备选：choco install git -y")
+        print("Windows：先在清华镜像入口的“获取下载链接”中查找可验证的安装包。")
+        print("未找到时使用：winget install --id Git.Git -e --source winget")
     elif system == "darwin":
-        print("macOS：xcode-select --install")
-        print("或：brew install git")
+        print("macOS：先运行 xcode-select --install")
+        print("Homebrew 镜像说明：https://mirrors.tuna.tsinghua.edu.cn/help/homebrew/")
+        print("Bottles 镜像说明：https://mirrors.tuna.tsinghua.edu.cn/help/homebrew-bottles/")
+        print("安装 Git：brew install git")
     else:
-        print("Debian/Ubuntu：sudo apt-get update && sudo apt-get install -y git openssh-client")
-        print("Fedora/RHEL：sudo dnf install -y git openssh-clients")
-        print("Arch：sudo pacman -S --needed git openssh")
-    print("中国区环境优先使用现有系统镜像或企业代理，不要关闭 SSL 校验。")
+        print("Ubuntu：https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu/")
+        print("Debian：https://mirrors.tuna.tsinghua.edu.cn/help/debian/")
+        print("Fedora：https://mirrors.tuna.tsinghua.edu.cn/help/fedora/")
+        print("Arch Linux：https://mirrors.tuna.tsinghua.edu.cn/help/archlinux/")
+        print("请先确认发行版、版本代号与架构，备份原软件源后再按对应帮助页配置。")
+    print("不要关闭 SSL 校验；镜像不可用时恢复原软件源。")
 
 
 def ensure_git() -> None:

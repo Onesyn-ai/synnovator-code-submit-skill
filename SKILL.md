@@ -219,39 +219,151 @@ sudo dnf install -y git openssh-clients
 sudo pacman -S --needed git openssh
 ```
 
-### 6.3 中国区环境处理
+### 6.3 中国区环境：优先使用清华大学 TUNA 镜像
 
-不得自动把系统源替换为某个固定镜像。按以下优先级处理：
+在中国大陆网络环境中，若检测到 Git 未安装，或系统软件源下载明显超时、失败，优先向用户提供清华大学开源软件镜像站地址。AI 必须先识别操作系统、Linux 发行版、版本代号和 CPU 架构，再选择匹配的镜像配置；不得把其他发行版或错误版本代号的源写入系统。
 
-1. 先使用系统已有包管理器和用户当前镜像配置；
-2. 检查是否已配置企业代理或终端代理；
-3. 若用户提供代理地址，可按用户要求配置 Git；
-4. 若只对当前命令使用代理，优先使用临时环境变量，不修改全局配置；
-5. 只有用户明确要求时才设置全局代理。
+清华大学开源软件镜像站统一入口：
 
-检查当前 Git 代理：
-
-```bash
-git config --global --get http.proxy
-git config --global --get https.proxy
+```text
+https://mirrors.tuna.tsinghua.edu.cn/
 ```
 
-临时代理示例：
+仅 IPv4 网络可使用：
 
-```bash
-HTTPS_PROXY=http://127.0.0.1:7890 git fetch origin
+```text
+https://mirrors4.tuna.tsinghua.edu.cn/
 ```
 
-SSH 连接较慢时可使用：
+#### Ubuntu
 
-```bash
-ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -T git@synnovator.com
+镜像仓库与配置帮助：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/ubuntu/
+https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu/
 ```
 
-不要为了“加速”而关闭 SSL 校验，也不要执行：
+先检查版本和架构：
+
+```bash
+cat /etc/os-release
+dpkg --print-architecture
+```
+
+Ubuntu 24.04 及以上通常使用 `/etc/apt/sources.list.d/ubuntu.sources`；更早版本通常使用 `/etc/apt/sources.list`。替换前必须备份原配置，并从上面的帮助页选取与当前版本代号一致的内容。完成后执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git openssh-client
+```
+
+不要把 `security.ubuntu.com` 安全更新源强制替换为镜像源，避免因同步延迟错过最新安全更新。
+
+#### Debian
+
+镜像仓库与配置帮助：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/debian/
+https://mirrors.tuna.tsinghua.edu.cn/help/debian/
+```
+
+先检查版本和架构：
+
+```bash
+cat /etc/os-release
+dpkg --print-architecture
+```
+
+替换前必须备份 `/etc/apt/sources.list` 或 `/etc/apt/sources.list.d/debian.sources`，并使用与当前 Debian 版本代号一致的配置。完成后执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git openssh-client
+```
+
+安全更新源优先保留 `security.debian.org`，不要默认改为镜像源。
+
+#### Fedora
+
+镜像仓库与配置帮助：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/fedora/
+https://mirrors.tuna.tsinghua.edu.cn/help/fedora/
+```
+
+只有默认 Metalink 在当前网络不可用时，才按帮助页备份并修改 `/etc/yum.repos.d/fedora.repo` 与 `/etc/yum.repos.d/fedora-updates.repo`。然后执行：
+
+```bash
+sudo dnf makecache
+sudo dnf install -y git openssh-clients
+```
+
+#### Arch Linux
+
+镜像仓库与配置帮助：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/archlinux/
+https://mirrors.tuna.tsinghua.edu.cn/help/archlinux/
+```
+
+在 `/etc/pacman.d/mirrorlist` 顶部加入：
+
+```text
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch
+```
+
+备份原文件后执行：
+
+```bash
+sudo pacman -Syy
+sudo pacman -S --needed git openssh
+```
+
+#### macOS / Homebrew
+
+Homebrew 镜像帮助：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/help/homebrew/
+https://mirrors.tuna.tsinghua.edu.cn/help/homebrew-bottles/
+```
+
+只对当前终端临时使用清华镜像时：
+
+```bash
+export HOMEBREW_BREW_GIT_REMOTE="https://mirrors.tuna.tsinghua.edu.cn/git/homebrew/brew.git"
+export HOMEBREW_API_DOMAIN="https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles/api"
+export HOMEBREW_BOTTLE_DOMAIN="https://mirrors.tuna.tsinghua.edu.cn/homebrew-bottles"
+brew install git
+```
+
+不要未经确认把这些变量永久写入 `~/.zprofile`、`~/.bash_profile` 或其他 shell 配置文件。
+
+#### Windows
+
+Windows 上不应拼接或猜测带版本号的清华镜像安装包地址。优先从清华镜像统一入口的“获取下载链接”查找可用安装包；若没有可验证的 Git for Windows 镜像，则使用系统包管理器安装：
+
+```powershell
+winget install --id Git.Git -e --source winget
+```
+
+#### 失败回退与安全要求
+
+若清华镜像不可用，先恢复备份的源配置，再回退到用户原有软件源或系统默认源。不得为了“加速”关闭 TLS/SSL 校验，也不得执行：
 
 ```bash
 git config --global http.sslVerify false
+```
+
+Git 安装完成后统一验证：
+
+```bash
+git --version
+ssh -V
 ```
 
 ---
