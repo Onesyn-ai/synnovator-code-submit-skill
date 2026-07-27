@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""安全地把当前项目发布到 Synnovator 类 Git 托管平台。
+"""Synnovator 本地代码上传工具。
 
-该脚本不依赖平台私有 API。仓库列表与创建在没有插件/API时需要用户在网页完成，
+同一个工具提供彼此隔离的访问检查、SSH 绑定和提交推送阶段：
+
+- ``check``：只读检查账号 SSH 访问与指定仓库读取权限；
+- ``bind``：只处理 SSH 密钥生成、读取、公钥绑定和认证验证；
+- ``push``：只处理仓库选择、安全扫描、提交和推送，认证失败时直接停止；
+- ``run``：按“检查 -> 必要时绑定 -> 推送”编排上述独立阶段。
+
+该脚本不依赖平台私有 API。没有插件/API 时，仓库列表与创建需要用户在网页完成，
 然后把平台实际显示的 SSH 克隆地址提供给脚本。
 """
 
@@ -166,22 +173,17 @@ def confirm_exact(prompt: str, expected: str) -> bool:
 def print_git_install_help() -> None:
     system = platform.system().lower()
     print("未检测到 Git。请先安装 Git，然后重新运行脚本。")
-    print("中国区清华镜像入口：https://mirrors.tuna.tsinghua.edu.cn/")
     if system == "windows":
-        print("Windows：先在清华镜像入口的“获取下载链接”中查找可验证的安装包。")
-        print("未找到时使用：winget install --id Git.Git -e --source winget")
+        print("Windows：winget install --id Git.Git -e --source winget")
+        print("备选：choco install git -y")
     elif system == "darwin":
-        print("macOS：先运行 xcode-select --install")
-        print("Homebrew 镜像说明：https://mirrors.tuna.tsinghua.edu.cn/help/homebrew/")
-        print("Bottles 镜像说明：https://mirrors.tuna.tsinghua.edu.cn/help/homebrew-bottles/")
-        print("安装 Git：brew install git")
+        print("macOS：xcode-select --install")
+        print("或：brew install git")
     else:
-        print("Ubuntu：https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu/")
-        print("Debian：https://mirrors.tuna.tsinghua.edu.cn/help/debian/")
-        print("Fedora：https://mirrors.tuna.tsinghua.edu.cn/help/fedora/")
-        print("Arch Linux：https://mirrors.tuna.tsinghua.edu.cn/help/archlinux/")
-        print("请先确认发行版、版本代号与架构，备份原软件源后再按对应帮助页配置。")
-    print("不要关闭 SSL 校验；镜像不可用时恢复原软件源。")
+        print("Debian/Ubuntu：sudo apt-get update && sudo apt-get install -y git openssh-client")
+        print("Fedora/RHEL：sudo dnf install -y git openssh-clients")
+        print("Arch：sudo pacman -S --needed git openssh")
+    print("中国区环境优先使用现有系统镜像或企业代理，不要关闭 SSL 校验。")
 
 
 def ensure_git() -> None:
@@ -309,22 +311,90 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def ensure_ssh(host: str, email: str) -> None:
-    ok, output = test_ssh(host)
-    if ok:
-        print(f"SSH 认证已通过：git@{host}")
-        return
-    lower = output.lower() if output else ""
+def classify_ssh_failure(output: str) -> str:
+    lower = output.lower()
+    if "permission denied" in lower or "publickey" in lower:
+        return "auth"
+    if "host key verification failed" in lower:
+        return "hostkey"
     network_failures = (
         "could not resolve hostname",
         "connection timed out",
         "operation timed out",
         "connection refused",
         "no route to host",
+        "network is unreachable",
     )
     if any(item in lower for item in network_failures):
+        return "network"
+    return "unknown"
+
+
+def check_repository_read(remote: str, *, root: Path | None = None) -> tuple[bool, str]:
+    """只读检查指定仓库；空仓库也会返回成功。"""
+    cp = run(["git", "ls-remote", "--heads", remote], cwd=root, check=False)
+    output = "\n".join(x for x in ((cp.stdout or "").strip(), (cp.stderr or "").strip()) if x)
+    return cp.returncode == 0, output
+
+
+def access_check(
+    *,
+    host: str,
+    remote: str | None = None,
+    root: Path | None = None,
+    require_repository: bool = False,
+) -> bool:
+    """执行只读访问门禁，不生成密钥、不修改仓库、不提交、不推送。"""
+    print("\n[访问检查阶段：只读]")
+    ok, output = test_ssh(host)
+    if not ok:
+        if output:
+            print("账号 SSH 访问检查结果：")
+            print(output)
+        reason = classify_ssh_failure(output)
+        if reason == "auth":
+            print("账号 SSH 认证未通过，需要单独执行绑定阶段。")
+        elif reason == "hostkey":
+            print("主机指纹尚未确认。需要人工核对指纹，不能关闭主机密钥校验。")
+        elif reason == "network":
+            print("平台 SSH 主机不可达，请先检查网络、DNS、代理或 SSH 端口。")
+        else:
+            print("账号 SSH 访问未通过，不能进入推送阶段。")
+        return False
+
+    print(f"账号 SSH 访问已通过：git@{host}")
+    if remote:
+        repo_ok, repo_output = check_repository_read(remote, root=root)
+        if not repo_ok:
+            print(f"仓库读取失败：{remote}")
+            if repo_output:
+                print(repo_output)
+            return False
+        print(f"仓库读取已通过：{remote}")
+        return True
+
+    if require_repository:
+        print("当前没有可用于验证的仓库 SSH 地址。")
+        print("命令行模式不能在没有平台 API 的情况下枚举账号仓库。请提供 --remote，")
+        print("或由代码编辑 AI 工具通过已登录浏览器/平台插件读取仓库列表。")
+        return False
+
+    print("未提供仓库地址，本次仅确认账号 SSH 访问；尚未验证具体仓库读取权限。")
+    return True
+
+
+def bind_ssh(host: str, email: str) -> None:
+    """只执行 SSH 绑定流程，不接触项目仓库、提交或推送。"""
+    print("\n[SSH 绑定阶段：不提交、不推送]")
+    ok, output = test_ssh(host)
+    if ok:
+        print(f"SSH 认证已通过：git@{host}，无需重复绑定。")
+        return
+
+    reason = classify_ssh_failure(output)
+    if reason == "network":
         raise ToolError("SSH 主机当前不可达，请先检查网络、DNS、代理或平台 SSH 端口。\n" + output)
-    if "host key verification failed" in lower:
+    if reason == "hostkey":
         print("首次连接需要人工核对主机指纹。不要关闭主机密钥校验。")
         if not confirm_exact(f"将以交互方式连接 git@{host}，请核对终端显示的指纹。", "核对指纹"):
             raise ToolError("用户取消主机指纹核对")
@@ -333,10 +403,11 @@ def ensure_ssh(host: str, email: str) -> None:
         if ok:
             print(f"SSH 认证已通过：git@{host}")
             return
-        lower = output.lower() if output else ""
+
     if output:
-        print("SSH 检查结果：")
+        print("绑定前认证检查结果：")
         print(output)
+
     key_path = Path.home() / ".ssh" / "id_ed25519_synnovator"
     pub_path = key_path.with_suffix(key_path.suffix + ".pub")
     if not key_path.exists() or not pub_path.exists():
@@ -366,8 +437,7 @@ def ensure_ssh(host: str, email: str) -> None:
         if output:
             print(output)
         raise ToolError("SSH 认证仍未通过。请检查公钥是否完整、SSH config 和平台账号权限。")
-    print("SSH 认证已通过。")
-
+    print("SSH 绑定验证已通过。绑定阶段结束，尚未执行任何提交或推送。")
 
 def load_config(root: Path) -> dict[str, str]:
     path = root / ".git" / CONFIG_NAME
@@ -387,26 +457,81 @@ def save_config(root: Path, remote: str, mode: str) -> None:
 
 
 def get_existing_origin(root: Path) -> str:
+    if not is_git_repo(root):
+        return ""
     return git_output(root, "remote", "get-url", "origin", check=False)
 
 
+def validate_ssh_remote(remote: str) -> str:
+    value = remote.strip()
+    if not value:
+        raise ToolError("仓库地址为空")
+    if not (value.startswith("git@") or value.startswith("ssh://")):
+        raise ToolError("请提供平台页面实际显示的 SSH 克隆地址，而不是网页地址或 HTTPS 地址")
+    return value
+
+
+def current_checkout_info(root: Path) -> dict[str, str]:
+    if not is_git_repo(root):
+        return {}
+    top = git_output(root, "rev-parse", "--show-toplevel", check=False)
+    branch = git_output(root, "branch", "--show-current", check=False) or "(detached HEAD)"
+    upstream = git_output(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", check=False)
+    origin = get_existing_origin(root)
+    head = git_output(root, "log", "-1", "--pretty=%h %s", check=False)
+    return {
+        "top": top,
+        "branch": branch,
+        "upstream": upstream or "未设置",
+        "origin": origin or "未设置",
+        "head": head or "尚无提交",
+    }
+
+
+def confirm_existing_checkout(root: Path, origin: str) -> bool:
+    info = current_checkout_info(root)
+    if not info or not origin:
+        return False
+    print("\n检测到当前文件夹已经是带远端的 Git 仓库（通常来自 clone 或之前已绑定远端）：")
+    print(f"  仓库根目录：{info['top']}")
+    print(f"  origin：{origin}")
+    print(f"  当前分支：{info['branch']}")
+    print(f"  跟踪分支：{info['upstream']}")
+    print(f"  最近提交：{info['head']}")
+    print("继续后会把当前文件夹的变更同步提交到上述仓库的正式 main。")
+    return confirm_exact("是否继续使用这个已 clone/已配置的仓库同步推送？", "继续同步")
+
+
 def choose_remote(root: Path, cli_remote: str | None) -> str:
+    """选择目标仓库；已配置 origin 时必须单独确认是否继续同步。"""
     config = load_config(root)
     existing = get_existing_origin(root)
-    candidate = cli_remote or existing or config.get("remote", "")
-    if candidate:
-        print(f"检测到仓库 SSH 地址：{candidate}")
-        if confirm_exact("继续使用该仓库。", "使用此仓库"):
-            return candidate
-    print("没有平台 API 时，脚本不能安全地猜测仓库列表或创建接口。")
-    print("请在平台选择/创建仓库，然后复制页面实际显示的 SSH 克隆地址。")
-    remote = ask("仓库 SSH 地址")
-    if not remote:
-        raise ToolError("仓库地址为空")
-    if not (remote.startswith("git@") or remote.startswith("ssh://")):
-        raise ToolError("请提供 SSH 克隆地址，而不是网页地址或 HTTPS 地址")
-    return remote
 
+    if existing:
+        if confirm_existing_checkout(root, existing):
+            if cli_remote and validate_ssh_remote(cli_remote) != existing:
+                print("已确认继续同步当前仓库，因此忽略与 origin 不同的 --remote 参数。")
+            return validate_ssh_remote(existing)
+        print("用户未选择继续同步当前 origin，将改为选择其他仓库。")
+
+    if cli_remote:
+        candidate = validate_ssh_remote(cli_remote)
+        print(f"命令行指定目标仓库：{candidate}")
+        if confirm_exact("将使用该仓库作为新的推送目标。", "使用此仓库"):
+            return candidate
+        raise ToolError("用户取消使用 --remote 指定的仓库")
+
+    recent = config.get("remote", "")
+    if recent and recent != existing:
+        print(f"检测到上次使用的仓库：{recent}")
+        if confirm_exact("继续使用上次记录的仓库。", "使用此仓库"):
+            return validate_ssh_remote(recent)
+
+    print("没有平台 API 时，命令行脚本不能安全地枚举账号仓库或猜测创建接口。")
+    print("请在平台选择已有仓库；不满意时在网页新建仓库，并复制页面实际显示的 SSH 克隆地址。")
+    print("新建仓库时需要先确认仓库名和 private/public；默认建议 private。")
+    remote = ask("目标仓库 SSH 地址")
+    return validate_ssh_remote(remote)
 
 def configure_origin(root: Path, remote: str) -> None:
     existing = get_existing_origin(root)
@@ -691,26 +816,46 @@ def repo_label(remote: str) -> str:
     return tail[:-4] if tail.endswith(".git") else tail
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="安全地把当前项目发布到 Synnovator main 分支")
-    parser.add_argument("--project", default=".", help="项目目录，默认当前目录")
-    parser.add_argument("--remote", help="平台页面实际显示的 SSH 克隆地址")
-    parser.add_argument("--mode", choices=("incremental", "snapshot"), default="incremental", help="普通更新或快照替换")
-    args = parser.parse_args(argv)
+def resolve_email(root: Path | None, cli_email: str | None) -> str:
+    if cli_email:
+        return cli_email
+    if root and is_git_repo(root):
+        local = git_output(root, "config", "--get", "user.email", check=False)
+        if local:
+            return local
+    global_email = run(["git", "config", "--global", "--get", "user.email"], check=False).stdout.strip()
+    if global_email:
+        return global_email
+    email = ask("用于 SSH 公钥备注的邮箱")
+    if not email:
+        raise ToolError("邮箱为空")
+    return email
 
-    root = Path(args.project).expanduser().resolve()
-    if not root.is_dir():
-        raise ToolError(f"项目目录不存在：{root}")
 
-    print(f"项目目录：{root}")
-    ensure_git()
+def find_probe_remote(root: Path | None, cli_remote: str | None) -> str | None:
+    if cli_remote:
+        return validate_ssh_remote(cli_remote)
+    if root and is_git_repo(root):
+        origin = get_existing_origin(root)
+        if origin:
+            return origin
+    return None
+
+
+def push_workflow(root: Path, cli_remote: str | None, mode: str) -> None:
+    """只执行提交推送阶段；认证失败时停止，不在此阶段生成或绑定密钥。"""
+    print("\n[提交推送阶段：不会自动生成或绑定 SSH 密钥]")
+    remote = choose_remote(root, cli_remote)
+    host = parse_ssh_host(remote)
+    if not access_check(host=host, remote=remote, root=root, require_repository=True):
+        raise ToolError(
+            "提交推送阶段的访问门禁未通过，未修改 origin、未提交、未推送。\n"
+            "请单独运行：python scripts/synnovator_submit.py bind\n"
+            "绑定完成后再运行 push。"
+        )
+
     ensure_git_repo(root)
     ensure_identity(root)
-
-    remote = choose_remote(root, args.remote)
-    host = parse_ssh_host(remote)
-    email = git_output(root, "config", "--get", "user.email")
-    ensure_ssh(host, email)
     configure_origin(root, remote)
     ensure_gitignore(root)
 
@@ -724,22 +869,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     backup_preview = (
         "无（远端 main 不存在）"
         if expected_oid is None
-        else ("普通更新不创建" if args.mode == "incremental" else "archive/main-<时间戳>")
+        else ("普通更新不创建" if mode == "incremental" else "archive/main-<时间戳>")
     )
     print("\n推送计划")
     print(f"  目标仓库：{repo_label(remote)}")
     print(f"  远端地址：{remote}")
     print("  目标分支：main")
-    print(f"  发布模式：{'普通更新' if args.mode == 'incremental' else '快照替换'}")
+    print(f"  发布模式：{'普通更新' if mode == 'incremental' else '快照替换'}")
     print(f"  远端 main：{expected_oid or '不存在'}")
     print(f"  历史备份：{backup_preview}")
     print(f"  文件数量：{len(files)}")
     print(f"  预计内容：{human_size(int(scan['total_size']))}")
+    if scan["warnings"]:
+        print("  风险：检测到依赖目录、构建产物或无法读取的文件，请查看上方警告。")
     if scan["large"]:
         print("  风险：包含较大文件，请确认仓库体积和平台限制。")
     print("  已阻止：.env、私钥、常见凭证文件和疑似 Token。")
+    print("  注意：提交会包含 git add --all 可见的新增、修改和删除。")
 
-    if args.mode == "snapshot" and expected_oid:
+    if mode == "snapshot" and expected_oid:
         expected_confirmation = repo_label(remote)
         ok = confirm_exact(
             "远端 main 将以当前项目快照为准；原 main 会先保存到历史分支。",
@@ -750,12 +898,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not ok:
         raise ToolError("用户取消推送")
 
-    commit_changes(root, args.mode)
+    commit_changes(root, mode)
     if not has_head(root):
         raise ToolError("当前仓库没有可推送的提交")
-    archive = push(root, args.mode, expected_oid)
+    archive = push(root, mode, expected_oid)
     oid = verify_push(root)
-    save_config(root, remote, args.mode)
+    save_config(root, remote, mode)
 
     subject = git_output(root, "log", "-1", "--pretty=%s")
     print("\n上传完成。")
@@ -764,8 +912,87 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"提交：{oid[:7]} {subject}")
     if archive:
         print(f"历史备份：{archive}")
-    print("下一次普通更新：python scripts/synnovator_submit.py --mode incremental")
-    print("下一次快照替换：python scripts/synnovator_submit.py --mode snapshot")
+    print("下一次普通更新：python scripts/synnovator_submit.py push --mode incremental")
+    print("下一次快照替换：python scripts/synnovator_submit.py push --mode snapshot")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Synnovator 账号检查、SSH 绑定与安全代码推送工具")
+    sub = parser.add_subparsers(dest="command")
+
+    check_parser = sub.add_parser("check", help="只读检查账号 SSH 访问和指定仓库读取权限")
+    check_parser.add_argument("--project", default=".", help="用于发现现有 origin 的项目目录")
+    check_parser.add_argument("--remote", help="用于读取验证的仓库 SSH 地址")
+    check_parser.add_argument("--host", default=DEFAULT_HOST, help="平台 SSH 主机")
+
+    bind_parser = sub.add_parser("bind", help="只处理 SSH 密钥生成、公钥绑定和认证验证")
+    bind_parser.add_argument("--project", default=".", help="仅用于读取本地 Git 邮箱，不修改项目")
+    bind_parser.add_argument("--host", default=DEFAULT_HOST, help="平台 SSH 主机")
+    bind_parser.add_argument("--email", help="SSH 公钥备注邮箱")
+
+    push_parser = sub.add_parser("push", help="只处理仓库选择、安全扫描、提交和推送")
+    push_parser.add_argument("--project", default=".", help="项目目录，默认当前目录")
+    push_parser.add_argument("--remote", help="平台页面实际显示的 SSH 克隆地址")
+    push_parser.add_argument("--mode", choices=("incremental", "snapshot"), default="incremental")
+
+    run_parser = sub.add_parser("run", help="在一个工具中编排检查、必要时绑定、再推送")
+    run_parser.add_argument("--project", default=".", help="项目目录，默认当前目录")
+    run_parser.add_argument("--remote", help="平台页面实际显示的 SSH 克隆地址")
+    run_parser.add_argument("--host", default=DEFAULT_HOST, help="没有 remote 时使用的平台 SSH 主机")
+    run_parser.add_argument("--email", help="SSH 公钥备注邮箱")
+    run_parser.add_argument("--mode", choices=("incremental", "snapshot"), default="incremental")
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    raw_args = list(argv) if argv is not None else sys.argv[1:]
+    if not raw_args or raw_args[0].startswith("-"):
+        raw_args = ["run", *raw_args]
+    args = parser.parse_args(raw_args)
+    command = args.command
+
+    project_arg = getattr(args, "project", ".")
+    root = Path(project_arg).expanduser().resolve()
+    if not root.is_dir():
+        raise ToolError(f"项目目录不存在：{root}")
+
+    print(f"工具：synnovator-code-submit；执行阶段：{command}")
+    print(f"项目目录：{root}")
+    ensure_git()
+
+    if command == "check":
+        probe = find_probe_remote(root, args.remote)
+        host = parse_ssh_host(probe) if probe else args.host
+        ok = access_check(host=host, remote=probe, root=root, require_repository=True)
+        if not ok:
+            raise ToolError("访问检查未通过。认证失败时请运行 bind；仓库读取失败时请检查地址和权限。")
+        print("访问检查完成；没有执行绑定、提交或推送。")
+        return 0
+
+    if command == "bind":
+        email = resolve_email(root, args.email)
+        bind_ssh(args.host, email)
+        return 0
+
+    if command == "push":
+        push_workflow(root, args.remote, args.mode)
+        return 0
+
+    # run：仍是同一个 Skill 工具，但三个阶段保持边界清晰。
+    probe = find_probe_remote(root, args.remote)
+    host = parse_ssh_host(probe) if probe else args.host
+    account_ok = access_check(host=host, remote=probe, root=root, require_repository=False)
+    if not account_ok:
+        if not confirm_exact("访问检查失败。是否进入独立的 SSH 绑定阶段？", "开始绑定"):
+            raise ToolError("用户取消绑定，未进入提交推送阶段")
+        email = resolve_email(root, args.email)
+        bind_ssh(host, email)
+        if not access_check(host=host, remote=probe, root=root, require_repository=False):
+            raise ToolError("绑定后账号访问仍未通过，未进入提交推送阶段")
+
+    push_workflow(root, args.remote, args.mode)
     return 0
 
 

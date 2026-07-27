@@ -1,7 +1,7 @@
 ---
 name: synnovator-code-submit
-version: 1.0.0
-description: 在本地代码编辑器或 AI 编程工具中，安全地检查 Git、配置 SSH、选择或创建仓库、扫描敏感文件，并将当前项目发布到 Synnovator 类代码托管平台的 main 分支。
+version: 1.1.0
+description: 在一个本地 Skill 工具中，将账号访问检查、SSH 公钥绑定、仓库选择和安全提交推送拆分为独立阶段，并将当前项目发布到 Synnovator 类代码托管平台的 main 分支。
 ---
 
 # Synnovator 代码提交 Skill
@@ -85,29 +85,62 @@ synnovator.com
 
 ---
 
-## 4. 总体流程
+## 4. 总体流程与阶段边界
 
-严格按以下顺序执行：
+本 Skill 仍然是一个工具，但内部必须拆成三个相互隔离的阶段：
+
+### 阶段 A：访问检查 `check`
+
+只执行只读操作：
+
+1. 检查 Git 和 SSH 命令；
+2. 强制测试是否能访问平台账号；
+3. 尝试读取已绑定账号的仓库列表；
+4. 对选定或已知仓库执行只读 `git ls-remote`；
+5. 输出访问结果。
+
+本阶段禁止生成密钥、修改 `.git/config`、初始化仓库、提交或推送。
+
+### 阶段 B：SSH 绑定 `bind`
+
+仅当账号 SSH 认证未通过时进入：
+
+1. 检查并复用现有密钥；
+2. 必要时生成专用密钥；
+3. 读取并复制公钥；
+4. 指导用户在 SSH 公钥页面绑定；
+5. 再次验证账号访问。
+
+本阶段禁止选择仓库、修改 `origin`、扫描项目、提交或推送。若账号访问已经通过，直接结束并跳过重复绑定。
+
+### 阶段 C：提交推送 `push`
+
+只处理项目与仓库：
 
 1. 确定项目根目录；
-2. 检查 Git；
-3. 检查 Git 用户身份；
-4. 检查 SSH 密钥和平台绑定状态；
-5. 获取仓库列表或目标仓库地址；
-6. 必要时创建新仓库；
-7. 初始化或检查本地 Git 仓库；
-8. 更新 `.gitignore`；
-9. 扫描敏感文件、风险目录和大文件；
-10. 获取远端 `main` 状态；
-11. 生成推送计划；
-12. 展示风险并二次确认；
-13. 必要时保存远端 `main` 到历史分支；
-14. 提交本地变更；
-15. 推送到正式 `main`；
-16. 验证远端提交；
-17. 输出结果和下一次“一键更新”命令。
+2. 检测当前文件夹是否为已 clone 或已配置远端的仓库；
+3. 即使已存在 `origin`，也必须询问是否继续同步到该仓库；
+4. 选择已有仓库，或确认名称和 `private` / `public` 后创建新仓库；
+5. 重新执行账号和目标仓库的只读访问门禁；
+6. 初始化或检查本地 Git 仓库；
+7. 更新 `.gitignore` 并扫描敏感文件、风险目录和大文件；
+8. 获取远端 `main` 状态并生成推送计划；
+9. 展示风险并进行二次确认；
+10. 必要时保存远端原 `main` 到历史分支；
+11. 提交并推送到正式 `main`；
+12. 验证远端提交。
 
-任何一步失败都应停止后续写操作，并给出明确修复命令。
+`push` 阶段认证失败时必须立即停止，并提示用户单独执行 `bind`；不得在推送流程中静默生成或绑定密钥。
+
+### 一键编排 `run`
+
+`run` 仍属于同一个 Skill 工具，其作用只是按以下顺序调用独立阶段：
+
+```text
+check → 认证失败时询问并进入 bind → 再次 check → push
+```
+
+阶段之间必须输出清晰边界。任何一步失败都停止后续写操作，并给出明确修复命令。
 
 ---
 
@@ -406,11 +439,52 @@ git config --global user.email "<EMAIL>"
 
 ---
 
-## 8. 第四步：检查 SSH 密钥和绑定状态
+## 8. 第四步：访问检查与 SSH 绑定完全分离
 
-### 8.1 检查现有密钥
+### 8.1 访问检查阶段必须先执行
 
-检查：
+先测试账号 SSH 访问：
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 -T git@synnovator.com
+```
+
+判断规则：
+
+- 输出明确表示认证成功时，即使命令退出码非 0，也可视为账号访问通过；
+- `Permission denied (publickey)` 表示账号绑定或本机密钥选择存在问题；
+- DNS、超时、拒绝连接和主机不可达属于网络问题，不得误判为“没有绑定”；
+- 首次连接出现主机指纹确认时，必须让用户核对指纹，不能关闭主机校验。
+
+账号访问通过后，必须继续检查仓库读取能力。读取仓库列表按以下优先级：
+
+1. 代码编辑 AI 工具已连接的平台插件；
+2. 已登录的平台浏览器会话；
+3. 平台明确提供并已配置的 API；
+4. 用户提供任意一个有权限仓库的 SSH 地址，执行只读验证。
+
+指定仓库的只读验证：
+
+```bash
+git ls-remote --heads <SSH_URL>
+```
+
+空仓库没有分支输出也可以是成功，必须以命令退出状态判断。不得使用 `git clone` 作为账号检查，因为 clone 会创建本地文件。
+
+命令行脚本在没有平台 API 时不能枚举整个账号的仓库列表，此时必须明确说明限制，并要求提供一个仓库 SSH 地址进行读取验证。不得伪造仓库列表。
+
+### 8.2 访问失败后的分流
+
+- **账号 SSH 认证失败**：结束访问检查，询问是否进入独立的绑定阶段；
+- **账号认证成功但仓库读取失败**：不要重新生成密钥，优先检查仓库地址、账号权限、仓库是否存在；
+- **网络失败**：先处理网络、DNS、代理或 SSH 端口；
+- **仓库列表无法枚举但账号认证成功**：允许进入仓库选择或新建仓库流程，但目标仓库确定后必须再次执行 `git ls-remote`。
+
+### 8.3 独立 SSH 绑定阶段
+
+绑定阶段不得初始化项目仓库，也不得执行 `git add`、`git commit`、`git remote set-url` 或 `git push`。
+
+先检查现有密钥：
 
 ```bash
 ls -la ~/.ssh
@@ -427,28 +501,9 @@ id_rsa
 id_rsa.pub
 ```
 
-不得覆盖已有私钥。若目标文件已存在，必须复用、改用新文件名，或让用户选择。
+不得覆盖已有私钥。若账号访问已经通过，立即结束绑定阶段，不重复生成或上传公钥。
 
-### 8.2 测试平台认证
-
-```bash
-ssh -o BatchMode=yes -o ConnectTimeout=10 -T git@synnovator.com
-```
-
-判断规则：
-
-- 若输出明确表示认证成功，即使命令退出码非 0，也可视为已绑定；
-- 若出现 `Permission denied (publickey)`，视为未绑定或未选中正确密钥；
-- 若是 DNS、超时或主机不可达，不得误判为未绑定，应先处理网络；
-- 首次连接出现主机指纹确认时，向用户展示主机名和指纹，确认后再加入 `known_hosts`。
-
-已认证成功时：
-
-- 跳过密钥生成；
-- 跳过设置页粘贴步骤；
-- 直接进入仓库选择。
-
-### 8.3 生成专用 SSH 密钥
+### 8.4 生成专用 SSH 密钥
 
 优先 Ed25519：
 
@@ -464,7 +519,7 @@ ssh-keygen -t rsa -b 4096 -C "<EMAIL>" -f ~/.ssh/id_rsa_synnovator
 
 建议用户为私钥设置口令。不得把私钥口令写入脚本、配置或日志。
 
-### 8.4 配置 SSH 使用专用密钥
+### 8.5 配置 SSH 使用专用密钥
 
 在 `~/.ssh/config` 中追加，不覆盖原内容：
 
@@ -492,25 +547,6 @@ chmod 600 ~/.ssh/id_ed25519_synnovator
 chmod 644 ~/.ssh/id_ed25519_synnovator.pub
 ```
 
-### 8.5 启动 ssh-agent 并加载密钥
-
-Linux / macOS：
-
-```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519_synnovator
-```
-
-Windows PowerShell：
-
-```powershell
-Get-Service ssh-agent | Set-Service -StartupType Automatic
-Start-Service ssh-agent
-ssh-add $HOME\.ssh\id_ed25519_synnovator
-```
-
-若修改系统服务需要管理员权限，先说明并确认。
-
 ### 8.6 读取并复制公钥
 
 ```bash
@@ -523,45 +559,9 @@ Windows PowerShell：
 Get-Content $HOME\.ssh\id_ed25519_synnovator.pub
 ```
 
-公钥应以以下之一开头：
+公钥必须是单行，并以平台支持的算法标识开头。只能展示公钥，禁止展示私钥。
 
-```text
-ssh-ed25519
-ssh-rsa
-ecdsa-sha2-nistp256
-ecdsa-sha2-nistp384
-ecdsa-sha2-nistp521
-sk-ecdsa-sha2-nistp256@openssh.com
-sk-ssh-ed25519@openssh.com
-```
-
-复制到剪贴板：
-
-macOS：
-
-```bash
-pbcopy < ~/.ssh/id_ed25519_synnovator.pub
-```
-
-Windows：
-
-```powershell
-Get-Content $HOME\.ssh\id_ed25519_synnovator.pub | Set-Clipboard
-```
-
-Linux，按可用命令选择：
-
-```bash
-wl-copy < ~/.ssh/id_ed25519_synnovator.pub
-```
-
-或：
-
-```bash
-xclip -selection clipboard < ~/.ssh/id_ed25519_synnovator.pub
-```
-
-### 8.7 指导用户绑定
+### 8.7 指导用户绑定并验证
 
 告诉用户：
 
@@ -569,35 +569,51 @@ xclip -selection clipboard < ~/.ssh/id_ed25519_synnovator.pub
 2. 在“密钥名称”中填写可识别名称，例如 `比赛电脑-2026`；
 3. 在“密钥内容”中粘贴刚才读取出的整行公钥；
 4. 点击“增加密钥”；
-5. 回到终端后继续。
+5. 回到终端继续验证。
 
-然后再次执行：
+再次执行：
 
 ```bash
 ssh -o BatchMode=yes -o ConnectTimeout=10 -T git@synnovator.com
 ```
 
-只有验证通过后才能进入推送阶段。
+验证通过后，绑定阶段结束。此时仍然不得自动提交或推送，必须显式进入 `push` 阶段。
 
 ---
 
 ## 9. 第五步：选择已有仓库或创建新仓库
 
-### 9.1 优先检测当前仓库远端
+### 9.1 检测当前文件夹是否已有 clone/远端
+
+提交推送阶段开始时执行：
 
 ```bash
+git rev-parse --is-inside-work-tree
+git rev-parse --show-toplevel
 git remote -v
+git branch --show-current
+git rev-parse --abbrev-ref --symbolic-full-name @{upstream}
+git log -1 --oneline
 ```
 
-若当前目录已经存在指向 `synnovator.com` 的 `origin`，显示：
+Git 无法可靠区分“由 clone 创建”和“本地 init 后添加 remote”，因此只要当前文件夹是 Git 仓库且存在远端，就按“已有 clone/已配置仓库”处理。
 
-- 远端名称；
-- fetch URL；
-- push URL；
+显示以下信息：
+
+- 仓库根目录；
+- `origin` 的 fetch 和 push 地址；
 - 当前分支；
-- 是否有跟踪分支。
+- 跟踪分支；
+- 最近一次提交。
 
-询问是否继续使用。用户确认后可跳过仓库列表。
+即使 `origin` 指向 Synnovator，也不得直接使用。必须询问：
+
+```text
+是否继续使用这个已 clone/已配置的仓库同步推送？
+请输入“继续同步”确认。
+```
+
+用户确认后才能继续使用该远端。用户拒绝时，进入仓库列表选择或新建仓库流程，不得静默替换 `origin`。
 
 ### 9.2 读取已绑定用户的仓库
 
@@ -606,7 +622,7 @@ git remote -v
 1. 当前 AI 工具已连接的平台插件；
 2. 当前 AI 工具的浏览器自动化，且用户已登录；
 3. 平台明确提供并已配置的 API；
-4. 本地保存的最近仓库列表；
+4. 本地保存的最近仓库记录；
 5. 让用户粘贴仓库 SSH 克隆地址。
 
 展示仓库时至少包含：
@@ -618,7 +634,13 @@ git remote -v
 - SSH 地址；
 - 最近更新时间（若可得）。
 
-不要通过猜测路径来伪造“仓库列表”。
+用户选择仓库后，必须先执行只读检查：
+
+```bash
+git ls-remote --heads <SSH_URL>
+```
+
+读取失败时不得进入扫描、提交和推送。
 
 ### 9.3 用户不满意时创建仓库
 
@@ -629,30 +651,26 @@ git remote -v
 3. 可见性：`private` 或 `public`；
 4. 是否确认创建。
 
-仓库名建议规则：
+新建仓库默认建议 `private`。仓库名建议只使用：
 
 ```text
 [a-zA-Z0-9._-]
 ```
 
-建议使用小写英文和短横线。若名称包含空格或平台不支持字符，先转换并让用户确认。
+建议不初始化 README、`.gitignore` 和 License，默认分支为 `main`，避免首次推送出现无关历史。
 
-新仓库建议：
+若无平台 API 或浏览器自动化，指导用户在网页中新建仓库，然后粘贴平台实际显示的 SSH 地址。不能猜测仓库创建接口。
 
-- 不初始化 README；
-- 不初始化 `.gitignore`；
-- 不初始化 License；
-- 默认分支为 `main`。
+### 9.4 推送阶段的强制访问门禁
 
-这样可避免首次推送出现不相关历史。
+目标仓库确定后，`push` 阶段必须重新执行：
 
-若无可用 API 或浏览器自动化，指导用户在网页中新建仓库，然后粘贴仓库的 SSH 地址，例如：
-
-```text
-git@synnovator.com:<owner>/<repo>.git
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 -T git@synnovator.com
+git ls-remote --heads <SSH_URL>
 ```
 
-上面的格式只是示例，必须以平台页面实际显示的 SSH 克隆地址为准。
+该门禁只读。若认证失败，`push` 必须停止并提示单独运行 `bind`，不能在推送阶段自动绑定。若仓库读取失败但账号认证成功，应检查仓库地址或权限，不要盲目重建密钥。
 
 ---
 
@@ -1198,33 +1216,52 @@ git status --short --branch
 
 ---
 
-## 20. 一键入口
+## 20. 同一个 Skill 工具的分阶段入口
 
-本 Skill 附带脚本：
+工具仍然只有一个脚本，但提供四个入口。
 
-```bash
-python scripts/synnovator_submit.py
-```
-
-首次使用可指定 SSH 地址：
+### 20.1 只读访问检查
 
 ```bash
-python scripts/synnovator_submit.py --remote git@synnovator.com:<owner>/<repo>.git
+python scripts/synnovator_submit.py check \
+  --remote git@synnovator.com:<owner>/<repo>.git
 ```
 
-普通更新：
+只检查账号访问和仓库读取，不生成密钥、不修改项目、不提交、不推送。
+
+### 20.2 单独绑定 SSH
 
 ```bash
-python scripts/synnovator_submit.py --mode incremental
+python scripts/synnovator_submit.py bind
 ```
 
-以当前文件夹替换正式版本：
+只生成/读取公钥并指导绑定，不选择仓库、不提交、不推送。
+
+### 20.3 单独提交推送
 
 ```bash
-python scripts/synnovator_submit.py --mode snapshot
+python scripts/synnovator_submit.py push \
+  --remote git@synnovator.com:<owner>/<repo>.git \
+  --mode incremental
 ```
 
-脚本只负责本地 Git、SSH 检查、安全扫描、备份分支和推送。没有平台 API 配置时，仓库列表和仓库创建仍由 AI 工具通过网页或让用户提供 SSH 地址完成。
+`push` 会重新进行只读访问门禁，但认证失败时只停止并提示运行 `bind`，不会自动进入绑定。
+
+快照替换：
+
+```bash
+python scripts/synnovator_submit.py push --mode snapshot
+```
+
+### 20.4 一键编排
+
+```bash
+python scripts/synnovator_submit.py run
+```
+
+不写子命令时默认等同于 `run`。它仍然是一个 Skill 工具，只是按阶段调用 `check`、必要时 `bind`、再 `push`。
+
+没有平台 API 配置时，仓库列表和仓库创建仍由 AI 工具通过已登录网页完成，或让用户提供平台实际显示的 SSH 地址。
 
 ---
 
@@ -1235,9 +1272,9 @@ python scripts/synnovator_submit.py --mode snapshot
 推荐顺序：
 
 1. “当前要上传哪个目录？”
-2. “使用已有仓库，还是创建新仓库？”
-3. “新仓库名称是什么？”
-4. “设为 private 还是 public？”
+2. “检测到当前文件夹已有 origin，是否继续同步这个仓库？”
+3. “使用账号下哪个已有仓库，还是创建新仓库？”
+4. “新仓库名称是什么，设为 private 还是 public？”
 5. “这是普通更新，还是用当前文件夹替换正式 main？”
 6. “确认推送吗？”
 
@@ -1248,7 +1285,7 @@ python scripts/synnovator_submit.py --mode snapshot
 例如：
 
 - SSH 已认证，跳过绑定；
-- 当前已有正确 `origin`，不再要求粘贴地址；
+- 当前已有 `origin`，仍必须确认是否继续同步，但确认后不再要求重复粘贴地址；
 - Git 身份已配置，不再询问；
 - 远端仓库为空，不再提示覆盖风险；
 - `.env` 已忽略，不再要求用户手工删除。
@@ -1328,7 +1365,9 @@ ssh -vT git@synnovator.com
 只有同时满足以下条件才报告成功：
 
 - `git --version` 可用；
-- SSH 认证通过；
+- SSH 账号认证通过；
+- 目标仓库的只读 `git ls-remote` 验证通过；
+- 若当前文件夹原本已有远端，用户已明确输入“继续同步”确认使用，或已明确选择其他仓库；
 - `origin` 指向用户确认的仓库；
 - 高危敏感文件为 0；
 - 用户完成二次确认；
