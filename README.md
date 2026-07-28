@@ -1,40 +1,56 @@
 # Synnovator Code Submit Skill
 
-用于本地代码编辑器和 AI 编程工具的一键安全上传 Skill。
+在本地代码编辑器、Codex、Copilot、Cursor、Claude Code 等 AI 编程环境中，将当前文件夹安全上传到 Synnovator/Forgejo。
 
-**版本 2.0 起，默认且最高优先级使用 HTTPS + Git Credential Manager + Forgejo OAuth2。SSH 只作为显式备用方式。**
+版本 `3.1.0` 的认证顺序：
+
+```text
+Forgejo 细粒度访问令牌 + API + Git Credential Manager
+→ 读取账号和仓库
+→ 选择或创建仓库
+→ HTTPS Git 推送
+→ 没有可用令牌时才使用 GCM OAuth2 浏览器授权
+→ SSH 仅为显式备用
+```
 
 ## 文件
 
-- `SKILL.md`：完整工作流、认证优先级、风险规则和 AI 行为要求。
-- `scripts/synnovator_submit.py`：本地交互式提交工具。
+- `SKILL.md`：完整流程、API、scope、浏览器授权、安全规则和 AI 行为要求。
+- `scripts/synnovator_submit.py`：交互式一键工具。
 
-## 默认认证流程
-
-```text
-HTTPS 仓库
-→ Git Credential Manager
-→ 浏览器授权 Git Credential Manager OAuth2 应用
-→ 系统凭据保险库
-→ Git 拉取和推送
-```
-
-平台授权管理页：
+## 关键地址
 
 ```text
-https://www.synnovator.com/user/settings/applications
+平台：https://www.synnovator.com
+Swagger：https://www.synnovator.com/api/swagger
+API：https://www.synnovator.com/api/v1
+令牌/OAuth2：https://www.synnovator.com/user/settings/applications
+Forgejo scope：https://forgejo.org/docs/latest/user/authentication/token-scope/
 ```
 
-脚本不会读取或打印 OAuth access token、refresh token、密码或 Authorization 请求头。
+## 为什么 API 令牌优先
+
+Forgejo 访问令牌可以限制 API 路由和仓库范围；OAuth2 token 当前没有同等细粒度 scope。因此默认先使用最小权限令牌：
+
+```text
+只推送指定已有仓库：特定仓库 + write:repository
+读取账号和仓库列表：read:user + write:repository
+通过 API 新建个人仓库：read:user + write:user + write:repository
+```
+
+令牌通过隐藏输入读取，并交给 Git Credential Manager 保存。脚本不会打印令牌，也不会把令牌写入 URL、项目文件或 `.git/config`。
+
+已知目标仓库时，脚本允许使用只有 `write:repository` 的特定仓库令牌，并通过 `GET /api/v1/repos/{owner}/{repo}` 验证。此类令牌无法访问 `/api/v1/user` 时可能返回 `403`，脚本不会因此误删令牌或要求扩大权限。只有读取账号/仓库列表或通过 API 创建仓库时，才要求 `read:user`/`write:user`。
 
 ## 环境要求
 
-- Git 2.30 或更高版本；
+- Python 3.10 或更高版本；
+- Git 2.27 或更高版本；
 - Git Credential Manager 2.4.1 或更高版本；
-- 可访问 `https://www.synnovator.com` 的 443 端口；
-- 一个真实仓库的 HTTPS 克隆地址。
+- 可访问 `https://www.synnovator.com:443`；
+- 操作系统具有安全凭据存储。
 
-Windows 的 Git for Windows 通常包含 GCM：
+Windows 通常通过 Git for Windows 获得 GCM：
 
 ```powershell
 winget install --id Git.Git -e --source winget
@@ -46,70 +62,111 @@ macOS：
 brew install --cask git-credential-manager
 ```
 
-## 四个主要入口
+## 一键上传
 
-### 1. 只读检查
+在待上传项目目录执行：
+
+```bash
+python /path/to/synnovator-code-submit-skill/scripts/synnovator_submit.py run
+```
+
+流程：
+
+```text
+检查 Git/GCM/API
+→ 复用安全存储中的访问令牌
+→ 没有令牌时打开访问令牌页面
+→ 已知仓库时用仓库 API 验证最小权限令牌
+→ 需要时再用账号 API 读取或创建仓库
+→ 确认已有 clone/origin
+→ 无 PAT 时才启动 OAuth2 浏览器授权
+→ 安全扫描
+→ 二次确认
+→ 提交并推送 main
+→ 验证远端提交
+```
+
+## 只读检查
 
 ```bash
 python scripts/synnovator_submit.py check \
   --remote https://www.synnovator.com/<owner>/<repo>.git
 ```
 
-只检查 Git、GCM 和仓库读取，不打开浏览器、不初始化项目、不提交、不推送。
+不会打开浏览器、初始化仓库、修改远端或推送。
 
-### 2. 独立 OAuth2 授权
+## API 文档
 
 ```bash
-python scripts/synnovator_submit.py auth \
+python scripts/synnovator_submit.py api-docs
+```
+
+脚本会尝试使用系统默认浏览器打开 Swagger 和 Forgejo token scope 文档。
+
+## 独立认证
+
+API 令牌优先，OAuth2 备用：
+
+```bash
+python scripts/synnovator_submit.py auth --auth auto \
   --remote https://www.synnovator.com/<owner>/<repo>.git
 ```
 
-先复用已有 Git Credential Manager OAuth2 凭据。没有有效凭据时，GCM 会打开浏览器，让用户授权平台中的 `Git Credential Manager` 应用。
-
-授权完成后脚本会再次以非交互模式读取仓库，确认凭据能够复用。
-
-### 3. 独立提交推送
+只使用访问令牌：
 
 ```bash
-python scripts/synnovator_submit.py push \
-  --remote https://www.synnovator.com/<owner>/<repo>.git \
-  --mode incremental
+python scripts/synnovator_submit.py auth --auth pat
 ```
 
-`push` 不会静默授权。OAuth2 访问未通过时会停止并要求先运行 `auth`。
+只使用 OAuth2：
 
-如果当前文件夹已经 clone 或配置了 `origin`，脚本会显示仓库信息，并要求输入：
+```bash
+python scripts/synnovator_submit.py auth --auth oauth \
+  --remote https://www.synnovator.com/<owner>/<repo>.git
+```
+
+OAuth2 模式会由 Git Credential Manager 启动系统默认浏览器。真正的授权 URL 和本机回调由 GCM 管理。
+
+## 仓库读取和创建
+
+```bash
+python scripts/synnovator_submit.py repos
+```
+
+使用 Forgejo API：
+
+```text
+GET  /api/v1/repos/{owner}/{repo}  验证已知目标仓库
+GET  /api/v1/user                 识别账号
+GET  /api/v1/user/repos           读取仓库列表
+POST /api/v1/user/repos           创建个人仓库
+```
+
+新仓库默认建议 `private`。公开仓库必须额外确认。
+
+## 已 clone 的文件夹
+
+检测到 `.git` 和 `origin` 时，脚本会显示：
+
+- 根目录；
+- 远端地址；
+- 当前分支；
+- 跟踪分支；
+- 最近提交。
+
+必须输入：
 
 ```text
 继续同步
 ```
 
-如果原 `origin` 是 SSH，会要求确认转换为：
+若原远端是 SSH，还必须输入：
 
 ```text
-https://www.synnovator.com/<owner>/<repo>.git
+转换 HTTPS
 ```
 
-### 4. 一键编排
-
-```bash
-python scripts/synnovator_submit.py run
-```
-
-不写子命令时也默认运行 `run`：
-
-```text
-检查
-→ 复用或完成 OAuth2 授权
-→ 确认仓库
-→ 安全扫描
-→ 二次确认
-→ 提交
-→ 推送 main
-→ 验证远端提交
-```
-
-## 更新模式
+## 单独推送
 
 普通增量更新：
 
@@ -117,27 +174,19 @@ python scripts/synnovator_submit.py run
 python scripts/synnovator_submit.py push --mode incremental
 ```
 
-用当前文件夹作为新的正式版本，并先保存原 `main`：
+使用当前文件夹替换正式版本，并先保存原 `main`：
 
 ```bash
 python scripts/synnovator_submit.py push --mode snapshot
 ```
 
-原远端版本会保存到：
+历史分支：
 
 ```text
 archive/main-YYYYMMDD-HHMMSS
 ```
 
-## 新建仓库
-
-没有目标仓库时，工具会询问：
-
-- 仓库名称；
-- `private` 或 `public`；
-- 是否打开平台新建仓库页面。
-
-创建完成后，粘贴页面显示的 HTTPS 克隆地址。工具不会猜测平台私有 API。
+`push` 不会静默打开浏览器或要求新令牌。没有已有凭据时会停止。
 
 ## 安全扫描
 
@@ -146,36 +195,33 @@ archive/main-YYYYMMDD-HHMMSS
 - `.env`、`.env.*`；
 - SSH/证书私钥；
 - `.npmrc`、`.pypirc`、`.netrc`；
-- 云凭证和服务账号文件；
+- 云凭据和服务账号文件；
+- 项目内克隆的 `.synnovator-submit-skill/` 工具目录；
 - 疑似 Token、密码、访问密钥；
 - 不小于 100 MiB 的文件。
 
-允许作为模板上传：
+允许模板：
 
 ```text
 .env.example
 .env.sample
 ```
 
-## SSH 备用方式
+## 浏览器行为
 
-只有 OAuth2 不可用且用户明确选择时使用：
+脚本可以启动默认浏览器，但普通 CLI 无法自动读取或操作该浏览器页面。用户需要自行：
+
+- 登录正确账号；
+- 创建最小权限访问令牌；
+- 或授权 `Git Credential Manager` OAuth2 应用。
+
+在无桌面环境中，自动打开浏览器可能失败，脚本会打印 URL。
+
+## SSH 备用
 
 ```bash
 python scripts/synnovator_submit.py ssh-bind \
-  --remote <平台页面实际显示的 SSH 克隆地址>
+  --remote <平台仓库页面显示的完整 SSH 地址>
 ```
 
-旧命令仍兼容：
-
-```bash
-python scripts/synnovator_submit.py bind --remote <SSH_REMOTE>
-```
-
-SSH 备用流程不会假设 `synnovator.com:22` 一定是平台 Git SSH 服务。
-
-## OAuth2 安全说明
-
-Forgejo 的 Git Credential Manager 应用由平台预注册。GCM 把凭据保存在系统安全存储中，而不是仓库文件里。
-
-不再使用某台电脑或应用时，可在平台的“已授权 OAuth2 应用程序”区域撤销 `Git Credential Manager`。部分 Forgejo 版本的 OAuth2 Token没有细粒度 scope，因此只在可信电脑上授权。
+SSH 不再是默认方式，也不会假设 `synnovator.com:22` 是平台 Git SSH 服务。
